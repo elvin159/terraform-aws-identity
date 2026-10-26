@@ -14,23 +14,35 @@ No static AWS keys are used anywhere.
 
 ## How it works
 
-- **One AWS account per environment** (dev, staging, prod). The module itself has no environment
-  logic. You apply the same code once per account.
-- **One root configuration**, [`examples/multi-account`](examples/multi-account), selects the
-  environment with two files:
-  - `env/<env>.tfvars`: account ID, region, cluster name, and settings for that environment.
-  - `env/<env>.s3.tfbackend`: the state bucket in that account.
+- **One AWS account per environment** (dev, stg, prd). The module itself has no environment
+  logic. Each environment calls it from its own root configuration.
+- **One folder per environment.** [`examples/cluster1`](examples/cluster1) shows the layout of a
+  cluster repo. Each environment folder is a separate Terraform root with its own state:
+
+  ```
+  cluster1/              # repo root for one Kubernetes cluster
+  ├── dev/               # Terraform root: dev account
+  │   ├── main.tf        #   backend, provider, environment values, module calls
+  │   ├── outputs.tf
+  │   └── .terraform.lock.hcl
+  ├── stg/               # Terraform root: stg account
+  └── prd/               # Terraform root: prd account
+  ```
+
+  The environment's values (account ID, region, cluster name, state bucket) are written directly
+  in its `main.tf`. To work on an environment, `cd` into its folder; there are no tfvars or
+  backend files to pick.
 - **Wrong-account protection:** the provider sets `allowed_account_ids`, so Terraform refuses to
-  run if your credentials belong to a different account than the tfvars says.
+  run if your credentials belong to a different account than the folder is for.
 - **Changes ship through CI:** open a PR to see the plan for every environment. Merge to apply
-  dev, then staging, then prod. See [CI/CD](#cicd).
+  dev, then stg, then prd. See [CI/CD](#cicd).
 
 ## Making a change
 
-1. Edit `examples/multi-account/main.tf` (which add-ons, and their settings) or `env/<env>.tfvars`
-   (per-environment values).
+1. Edit `examples/cluster1/<env>/main.tf` for each environment you want to change. To roll a
+   change out gradually, change `dev` first and the other environments in later PRs.
 2. Open a PR. Review the `plan` job summary for each environment.
-3. Get approval and merge. `apply` runs dev, then staging, then prod.
+3. Get approval and merge. `apply` runs dev, then stg, then prd.
 4. Put the role ARNs from the outputs into the Helm charts (see [Connecting to Helm](#connecting-to-helm)).
 
 ### Running a plan locally
@@ -38,12 +50,12 @@ No static AWS keys are used anywhere.
 Use SSO or another short-lived credential, never access keys:
 
 ```sh
-cd examples/multi-account
+cd examples/cluster1/dev
 aws sso login --profile dev
 export AWS_PROFILE=dev
 
-terraform init -backend-config=env/dev.s3.tfbackend -reconfigure
-terraform plan -var-file=env/dev.tfvars -lock=false
+terraform init
+terraform plan -lock=false
 ```
 
 Leave applies to CI.
@@ -137,15 +149,15 @@ Restart the pods after adding the annotation. The AWS credentials are injected w
 | `AccessDenied` on `AssumeRoleWithWebIdentity` | The chart's namespace or service account name doesn't match the module settings, or the annotation was added without restarting the pods. |
 | Cluster Autoscaler sees the node group but never scales it | The ASG lacks the `k8s.io/cluster-autoscaler/<cluster_name>=owned` tag. EKS managed node groups add it automatically; self-managed groups need it added. |
 | ExternalDNS logs `AccessDenied` for one domain | That hosted zone isn't in `hosted_zone_ids`. |
-| `allowed_account_ids` error | Your credentials are for a different account than `account_id` in the tfvars file you passed. |
+| `allowed_account_ids` error | Your credentials are for a different account than `account_id` in that environment folder's `main.tf`. |
 | Controller breaks after a chart upgrade | Upstream added permissions. Compare the policy with the new release (see [Versions](#versions)). |
 
 ## Versions
 
-| | Module | Root configuration (`examples/multi-account`) |
+| | Module | Root configurations (`examples/cluster1/<env>`) |
 |---|---|---|
 | Terraform | `>= 1.9.0, < 2.0.0` | `1.17.0` |
-| AWS provider | `>= 6.0.0, < 7.0.0` | `6.70.0`, locked in `.terraform.lock.hcl` |
+| AWS provider | `>= 6.0.0, < 7.0.0` | `6.70.0`, locked in each folder's `.terraform.lock.hcl` |
 
 Pin the module by git tag (`?ref=vX.Y.Z`). The IAM policies match these upstream releases:
 Cluster Autoscaler `v1.36.1` and AWS Load Balancer Controller `v3.6.2`. When you upgrade either
@@ -158,7 +170,7 @@ add-on, update its policy file (`cluster_autoscaler.tf` or `aws_load_balancer_co
 | Event | Runs |
 |---|---|
 | PR into `main` opened, reopened or updated with new commits | `fmt`, `validate`, then `plan` for every environment |
-| Merge into `main` | `fmt`, `validate`, then `apply` to dev, then staging, then prod. Stops at the first failure. |
+| Merge into `main` | `fmt`, `validate`, then `apply` to dev, then stg, then prd. Stops at the first failure. |
 
 GitHub logs in to AWS through OIDC; the repo holds no AWS secrets. PR plans skip the state lock so
 they never block an apply. At merge time, apply creates a new plan rather than reusing the PR's.
@@ -168,9 +180,9 @@ they never block an apply. At merge time, apply creates a new plan rather than r
 1. **Branch protection on `main`:** require an approved PR, and require the `fmt`, `validate` and
    `plan` checks to pass. This is what limits applies to approved changes.
 2. **GitHub environments:** each needs the variables `AWS_ROLE_ARN` and `AWS_REGION`.
-   - `dev-plan`, `staging-plan`, `prod-plan`: unprotected, holding a read-only plan role.
-   - `dev`, `staging`, `prod`: limited to the `main` branch, holding the apply role. Add required
-     reviewers (at least on `prod`) if you want a manual sign-off before apply.
+   - `dev-plan`, `stg-plan`, `prd-plan`: unprotected, holding a read-only plan role.
+   - `dev`, `stg`, `prd`: limited to the `main` branch, holding the apply role. Add required
+     reviewers (at least on `prd`) if you want a manual sign-off before apply.
 3. **In each AWS account:** register the IAM OIDC provider `token.actions.githubusercontent.com`
    (audience `sts.amazonaws.com`). Create two roles, each trusting a single GitHub environment
    through the `sub` claim:
